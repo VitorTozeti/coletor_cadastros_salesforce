@@ -101,7 +101,19 @@ def linhas_salesforce():
 LIMITE_NOVAS = 2000  # uso normal: dezenas por dia; um número alto indica tabela errada/vazia
 
 
+def recursos_que_o_openpyxl_destroi(xlsx):
+    """Partes do .xlsx que o openpyxl descarta ao regravar (Power Query / dados externos / dinâmicas / macros)."""
+    import zipfile
+    perigosos = ("xl/queryTables/", "xl/connections.xml", "xl/pivotTables/", "xl/vbaProject.bin", "xl/customData/")
+    with zipfile.ZipFile(xlsx) as z:
+        return sorted({n for n in z.namelist() if n.startswith(perigosos)})
+
+
 def anexa_no_excel(xlsx, novas_fn, dry_run, forcar=False):
+    perigo = recursos_que_o_openpyxl_destroi(xlsx)
+    if perigo:
+        sys.exit("A planilha tem consulta externa/Power Query, dinâmica ou macro (" + ", ".join(perigo[:3]) +
+                 "...). Gravar com openpyxl DESTRUIRIA isso (o Excel pediria reparo). Nada gravado.")
     wb = load_workbook(xlsx)
     ws = next((s for s in wb.worksheets if s.tables), None)
     if ws is None:
