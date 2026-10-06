@@ -1,0 +1,4 @@
+.venv/
+*.bak-*.xlsx
+coletor.log
+__pycache__/
