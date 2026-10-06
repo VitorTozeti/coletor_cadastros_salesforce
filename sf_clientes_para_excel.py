@@ -1,7 +1,7 @@
 """Salesforce (Account) -> PowerApp_Clientes.xlsx na pasta do SharePoint sincronizada pelo OneDrive.
 
 Roda no servidor do Caetano, 1x/dia. Só ADICIONA CardCodes que ainda não estão na tabela; linhas
-existentes nunca são alteradas. Faz backup antes de gravar.
+existentes nunca são alteradas. Faz backup antes de gravar e reabre o resultado para validar antes de trocar o arquivo.
 
 Uso:  python sf_clientes_para_excel.py --xlsx "<caminho local do PowerApp_Clientes.xlsx>" [--dry-run]
 
@@ -10,15 +10,12 @@ Uso:  python sf_clientes_para_excel.py --xlsx "<caminho local do PowerApp_Client
 import argparse
 import os
 import re
-import shutil
 import sys
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 import requests
-from openpyxl import load_workbook
-from openpyxl.worksheet.table import Table
+import xlsx_append
 
 AQUI = Path(__file__).parent
 COLUNAS = ["CardCode", "CardName", "Cod_Nome", "MailZipCod", "E_Mail", "MailStrNo", "Telefone", "Tipo_de_Conta",
@@ -101,53 +98,12 @@ def linhas_salesforce():
 LIMITE_NOVAS = 2000  # uso normal: dezenas por dia; um número alto indica tabela errada/vazia
 
 
-def recursos_que_o_openpyxl_destroi(xlsx):
-    """Partes do .xlsx que o openpyxl descarta ao regravar (Power Query / dados externos / dinâmicas / macros)."""
-    import zipfile
-    perigosos = ("xl/queryTables/", "xl/connections.xml", "xl/pivotTables/", "xl/vbaProject.bin", "xl/customData/")
-    with zipfile.ZipFile(xlsx) as z:
-        return sorted({n for n in z.namelist() if n.startswith(perigosos)})
+LIMITE_NOVAS = 2000  # uso normal: dezenas por dia; um número alto indica tabela errada/vazia
 
 
 def anexa_no_excel(xlsx, novas_fn, dry_run, forcar=False):
-    perigo = recursos_que_o_openpyxl_destroi(xlsx)
-    if perigo:
-        sys.exit("A planilha tem consulta externa/Power Query, dinâmica ou macro (" + ", ".join(perigo[:3]) +
-                 "...). Gravar com openpyxl DESTRUIRIA isso (o Excel pediria reparo). Nada gravado.")
-    wb = load_workbook(xlsx)
-    ws = next((s for s in wb.worksheets if s.tables), None)
-    if ws is None:
-        sys.exit("A planilha não tem nenhuma TABELA do Excel (Inserir > Tabela). Abortado sem gravar.")
-    tabela = next(iter(ws.tables.values()))
-    c1, r1, c2, r2 = _limites(tabela.ref)
-    cab = [str(ws.cell(r1, c).value).strip() for c in range(c1, c2 + 1)]
-    faltam = [c for c in COLUNAS if c not in cab]
-    if faltam:
-        sys.exit(f"Colunas ausentes na tabela {tabela.name}: {faltam}. Cabeçalho: {cab}. Abortado sem gravar.")
-    col = {nome: c1 + i for i, nome in enumerate(cab)}
-    existentes = {str(ws.cell(r, col["CardCode"]).value or "").strip().upper() for r in range(r1 + 1, r2 + 1)}
-    novas = [l for l in novas_fn() if l["CardCode"] not in existentes]
-    print(f"tabela {tabela.name}: {r2 - r1} linhas existentes; {len(novas)} CardCodes novos")
-    if dry_run or not novas:
-        return len(novas)
-    if len(novas) > LIMITE_NOVAS and not forcar:
-        sys.exit(f"{len(novas)} novos > limite de {LIMITE_NOVAS} (arquivo/tabela errado ou vazio?). "
-                 "Nada gravado. Se for esperado, rode com --forcar.")
-    backup = Path(xlsx).with_name(f"{Path(xlsx).stem}.bak-{datetime.now():%Y%m%d-%H%M%S}.xlsx")
-    shutil.copy2(xlsx, backup)
-    for i, linha in enumerate(novas, start=1):
-        for nome, valor in linha.items():
-            ws.cell(r2 + i, col[nome]).value = valor or None
-    tabela.ref = f"{ws.cell(r1, c1).coordinate}:{ws.cell(r2 + len(novas), c2).coordinate}"
-    tmp = Path(xlsx).with_suffix(".tmp.xlsx")  # grava ao lado e troca: arquivo nunca fica pela metade
-    wb.save(tmp)
-    os.replace(tmp, xlsx)
-    return len(novas)
-
-
-def _limites(ref):
-    from openpyxl.utils import range_boundaries
-    return range_boundaries(ref)
+    """Grava via xlsx_append (só XML da aba/tabela; o resto do arquivo fica intacto — openpyxl NÃO é usado)."""
+    return xlsx_append.anexa(xlsx, COLUNAS, novas_fn, dry_run, forcar, LIMITE_NOVAS)
 
 
 if __name__ == "__main__":
