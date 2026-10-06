@@ -2,3 +2,4 @@
 *.bak-*.xlsx
 coletor.log
 __pycache__/
+.env
