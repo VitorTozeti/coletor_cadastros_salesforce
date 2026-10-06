@@ -53,7 +53,10 @@ def sf_query(soql):
     h = {"Authorization": "Bearer " + t["access_token"]}
     url, params = t["instance_url"] + "/services/data/v60.0/query", {"q": soql}
     while url:
-        d = requests.get(url, params=params, headers=h, timeout=120).json()
+        resp = requests.get(url, params=params, headers=h, timeout=120)
+        if not resp.ok:
+            sys.exit(f"Salesforce recusou a consulta ({resp.status_code}): {resp.text[:200]}")
+        d = resp.json()
         yield from d["records"]
         url, params = (t["instance_url"] + d["nextRecordsUrl"], None) if not d["done"] else (None, None)
 
@@ -88,14 +91,17 @@ def linhas_salesforce():
             continue
         cod, nome = a["CA_CodigoSAP__c"].strip(), (a["Name"] or "").strip()
         yield {
-            "CardCode": cod, "CardName": nome, "Cod_Nome": f"{cod} - {nome}",
+            "CardCode": cod.upper(), "CardName": nome, "Cod_Nome": f"{cod} - {nome}",
             "MailZipCod": cep, "E_Mail": a["CA_Email__c"] or a["CA_EmailEmpresa__c"] or "",
             "MailStrNo": num, "Telefone": a["CA_Telefone1__c"] or a["CA_Celular__c"] or a["Phone"] or "",
             "Tipo_de_Conta": tipo, "Password": doc, "__PowerAppsId__": str(uuid.uuid4()),
         }
 
 
-def anexa_no_excel(xlsx, novas_fn, dry_run):
+LIMITE_NOVAS = 2000  # uso normal: dezenas por dia; um número alto indica tabela errada/vazia
+
+
+def anexa_no_excel(xlsx, novas_fn, dry_run, forcar=False):
     wb = load_workbook(xlsx)
     ws = next((s for s in wb.worksheets if s.tables), None)
     if ws is None:
@@ -107,18 +113,23 @@ def anexa_no_excel(xlsx, novas_fn, dry_run):
     if faltam:
         sys.exit(f"Colunas ausentes na tabela {tabela.name}: {faltam}. Cabeçalho: {cab}. Abortado sem gravar.")
     col = {nome: c1 + i for i, nome in enumerate(cab)}
-    existentes = {str(ws.cell(r, col["CardCode"]).value or "").strip() for r in range(r1 + 1, r2 + 1)}
+    existentes = {str(ws.cell(r, col["CardCode"]).value or "").strip().upper() for r in range(r1 + 1, r2 + 1)}
     novas = [l for l in novas_fn() if l["CardCode"] not in existentes]
     print(f"tabela {tabela.name}: {r2 - r1} linhas existentes; {len(novas)} CardCodes novos")
     if dry_run or not novas:
         return len(novas)
+    if len(novas) > LIMITE_NOVAS and not forcar:
+        sys.exit(f"{len(novas)} novos > limite de {LIMITE_NOVAS} (arquivo/tabela errado ou vazio?). "
+                 "Nada gravado. Se for esperado, rode com --forcar.")
     backup = Path(xlsx).with_name(f"{Path(xlsx).stem}.bak-{datetime.now():%Y%m%d-%H%M%S}.xlsx")
     shutil.copy2(xlsx, backup)
     for i, linha in enumerate(novas, start=1):
         for nome, valor in linha.items():
-            ws.cell(r2 + i, col[nome]).value = valor
+            ws.cell(r2 + i, col[nome]).value = valor or None
     tabela.ref = f"{ws.cell(r1, c1).coordinate}:{ws.cell(r2 + len(novas), c2).coordinate}"
-    wb.save(xlsx)
+    tmp = Path(xlsx).with_suffix(".tmp.xlsx")  # grava ao lado e troca: arquivo nunca fica pela metade
+    wb.save(tmp)
+    os.replace(tmp, xlsx)
     return len(novas)
 
 
@@ -131,10 +142,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--forcar", action="store_true", help="ignora o limite de segurança de novos CardCodes")
     a = ap.parse_args()
     carrega_env()
     try:
-        n = anexa_no_excel(a.xlsx, lambda: list(linhas_salesforce()), a.dry_run)
+        n = anexa_no_excel(a.xlsx, lambda: list(linhas_salesforce()), a.dry_run, a.forcar)
     except PermissionError:
         sys.exit("Excel em uso/bloqueado pelo OneDrive — tente de novo mais tarde. Nada foi gravado.")
     print("dry-run: nada gravado" if a.dry_run else f"{n} linhas adicionadas")
