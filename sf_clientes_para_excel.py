@@ -15,22 +15,26 @@ Regra de entrada (por que um cliente NÃO aparece no app):
 .env ao lado do script (nunca versionar): SF_CLIENT_ID, SF_CLIENT_SECRET, SF_LOGIN_URL.
 """
 import argparse
+import json
 import os
+import time
 import re
 import sys
 import uuid
 import zipfile
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
+import novos_xlsx
 import xlsx_append
 
 AQUI = Path(__file__).parent
 COLUNAS = ["CardCode", "CardName", "Cod_Nome", "MailZipCod", "E_Mail", "MailStrNo", "Telefone", "Tipo_de_Conta",
            "Password", "__PowerAppsId__"]
 # Tipo_de_Conta = CPF|CNPJ; Password = o próprio CPF/CNPJ formatado (padrão da planilha); __PowerAppsId__ = uuid4.
+DIAS_NOVOS = 7  # quantos dias um cliente novo fica no arquivo _Novos (o fluxo ignora CardCode repetido)
 LIMITE_NOVAS = 2000  # uso normal: dezenas por dia; um número alto indica tabela errada/vazia
 
 SOQL_CONTAS = (
@@ -122,9 +126,55 @@ def linhas_salesforce(contas=None, resumo=None):
         }
 
 
+ESTADO = AQUI / "novos_estado.json"  # nunca versionar (tem dados de clientes)
+TRAVA = AQUI / "coletor.lock"
+
+
+def _agora():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def registra_novos(novas):
+    """Guarda os clientes desta rodada (por data) para o arquivo _Novos; descarta os mais velhos que DIAS_NOVOS."""
+    estado = json.loads(ESTADO.read_text(encoding="utf-8")) if ESTADO.exists() else {}
+    for l in novas:
+        estado[l["CardCode"]] = {"em": _agora(), "linha": {c: l.get(c, "") for c in novos_xlsx.COLUNAS}}
+    ESTADO.write_text(json.dumps(estado, ensure_ascii=False), encoding="utf-8")
+
+
+def grava_novos(xlsx):
+    """Recria PowerApp_Clientes_Novos.xlsx (ao lado do principal) a partir do estado. Roda SEMPRE, mesmo sem novos."""
+    estado = json.loads(ESTADO.read_text(encoding="utf-8")) if ESTADO.exists() else {}
+    corte = (datetime.now() - timedelta(days=DIAS_NOVOS)).strftime("%Y-%m-%d")
+    estado = {k: v for k, v in estado.items() if v["em"] >= corte}
+    ESTADO.write_text(json.dumps(estado, ensure_ascii=False), encoding="utf-8")
+    destino = Path(xlsx).with_name(Path(xlsx).stem + "_Novos.xlsx")
+    novos_xlsx.grava(destino, [v["linha"] for v in estado.values()])
+    log(f"{destino.name}: {len(estado)} clientes dos últimos {DIAS_NOVOS} dias (o fluxo lê a tabela Novos)")
+
+
+def com_tentativas(fn, vezes=4, espera=120):
+    """Arquivo em uso/bloqueado pelo OneDrive costuma liberar em minutos: tenta de novo antes de desistir."""
+    for i in range(1, vezes + 1):
+        try:
+            return fn()
+        except PermissionError:
+            if i == vezes:
+                raise
+            log(f"arquivo em uso/bloqueado (tentativa {i}/{vezes}); nova tentativa em {espera}s")
+            time.sleep(espera)
+
+
+def pega_trava():
+    """Impede duas rodadas ao mesmo tempo (agendador + execução manual). Trava velha (>3h) é ignorada."""
+    if TRAVA.exists() and time.time() - TRAVA.stat().st_mtime < 3 * 3600:
+        sys.exit("Já existe uma rodada em andamento (coletor.lock). Nada feito.")
+    TRAVA.write_text(str(os.getpid()), encoding="utf-8")
+
+
 def anexa_no_excel(xlsx, novas_fn, dry_run, forcar=False):
     """Grava via xlsx_append (só XML da aba/tabela; o resto do arquivo fica intacto — openpyxl NÃO é usado)."""
-    return xlsx_append.anexa(xlsx, COLUNAS, novas_fn, dry_run, forcar, LIMITE_NOVAS)
+    return xlsx_append.anexa(xlsx, COLUNAS, novas_fn, dry_run, forcar, LIMITE_NOVAS, antes_de_gravar=registra_novos)
 
 
 def cardcodes_no_excel(xlsx):
@@ -162,24 +212,34 @@ def diagnostico(xlsx, termo):
         print(f"... e mais {len(contas) - 20} contas com '{termo}'")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--forcar", action="store_true", help="ignora o limite de segurança de novos CardCodes")
     ap.add_argument("--diagnostico", metavar="CARDCODE_OU_NOME", help="explica por que um cliente aparece ou não")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     carrega_env()
     if a.diagnostico:
         diagnostico(a.xlsx, a.diagnostico)
         sys.exit(0)
     resumo = Counter()
+    pega_trava()
     try:
-        n = anexa_no_excel(a.xlsx, lambda: list(linhas_salesforce(resumo=resumo)), a.dry_run, a.forcar)
+        n = com_tentativas(lambda: anexa_no_excel(a.xlsx, lambda: list(linhas_salesforce(resumo=resumo)), a.dry_run,
+                                                  a.forcar))
+        if not a.dry_run:
+            com_tentativas(lambda: grava_novos(a.xlsx))
     except PermissionError:
-        sys.exit("Excel em uso/bloqueado pelo OneDrive — tente de novo mais tarde. Nada foi gravado.")
+        sys.exit("Excel em uso/bloqueado pelo OneDrive mesmo após várias tentativas. Nada foi gravado.")
+    finally:
+        TRAVA.unlink(missing_ok=True)
     fora = {k: v for k, v in resumo.items() if k != "entra"}
     log(f"Salesforce: {sum(resumo.values())} contas; aptas={resumo['entra']}; fora do Excel={sum(fora.values())}")
     for motivo, qtd in sorted(fora.items(), key=lambda x: -x[1]):
         log(f"   fora: {qtd} {motivo}")
     log("dry-run: nada gravado" if a.dry_run else f"{n} linhas adicionadas")
+
+
+if __name__ == "__main__":
+    main()

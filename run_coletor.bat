@@ -8,3 +8,4 @@ pip install -q -r requirements.txt
 echo [%date% %time%] inicio >> coletor.log
 python sf_clientes_para_excel.py --xlsx "%XLSX_PATH%" >> coletor.log 2>&1
 echo [%date% %time%] fim (codigo %errorlevel%) >> coletor.log
+exit /b %errorlevel%

@@ -45,3 +45,18 @@ O combo "Código/Nome SAP" usa `Filter(Consulta1, Tipo_de_Conta <> "CNPJ")`. **E
 carrega as primeiras linhas da tabela (limite de linhas de dados do app, máx. 2000). Clientes além dessa linha —
 inclusive os novos, que o script adiciona no fim — podem não aparecer no combo. Solução definitiva: trocar a fonte
 para uma lista do SharePoint/Dataverse (delegável).
+
+## Arquitetura atual (07/10/2026) — o app NÃO lê mais o Excel
+O combo de clientes do app **Contratos** lê a **lista SharePoint `Clientes_PowerApp`** (busca por nome, delegável; o
+Excel não era delegável e o app só enxergava as 500 primeiras linhas). O fluxo é:
+
+1. **Este coletor** (servidor, 06:30) → acrescenta CardCodes novos em `PowerApp_Clientes.xlsx` (histórico/backup) **e**
+   recria `PowerApp_Clientes_Novos.xlsx` (tabela `Novos`) com os clientes dos últimos 7 dias.
+2. **Power Automate** (07:00) lê a tabela `Novos` e cria os itens na lista (`CardCode` é único: repetido = ignorado).
+3. O app lê a lista.
+
+Proteções do coletor: nunca usa openpyxl no arquivo principal; recusa Power Query/sem tabela/coluna faltando; backup
++ arquivo temporário + validação + troca atômica; trava `coletor.lock` (sem rodada dupla); 4 tentativas (2 min) se o
+OneDrive segurar o arquivo; estado `novos_estado.json` gravado ANTES da escrita (nada se perde se falhar no meio);
+sai com código ≠ 0 em qualquer falha (aparece no agendador e no `coletor.log`).
+Limitação conhecida: cliente já existente que mudar nome/e-mail no Salesforce não é atualizado (só entram CardCodes novos).

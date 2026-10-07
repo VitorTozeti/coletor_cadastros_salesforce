@@ -95,7 +95,7 @@ def _linha_xml(n, c1, c2, colunas, linha):
     return f'<row r="{n}" spans="{c1}:{c2}">{"".join(celulas)}</row>'
 
 
-def anexa(xlsx, colunas, novas_fn, dry_run=False, forcar=False, limite=2000):
+def anexa(xlsx, colunas, novas_fn, dry_run=False, forcar=False, limite=2000, antes_de_gravar=None):
     xlsx = str(xlsx)
     with zipfile.ZipFile(xlsx) as z:
         achados = sorted(n for n in z.namelist() if n.startswith(BLOQUEIA))
@@ -128,6 +128,8 @@ def anexa(xlsx, colunas, novas_fn, dry_run=False, forcar=False, limite=2000):
             sys.exit(f"{len(novas)} novos > limite de {limite} (arquivo/tabela errado ou vazio?). "
                      "Nada gravado. Se for esperado, rode com --forcar.")
 
+        if antes_de_gravar:
+            antes_de_gravar(novas)  # registra os novos ANTES de mexer no arquivo (nada se perde se a gravação falhar)
         fim = r2 + len(novas)
         antigo, novo = f"{l1}{r1}:{l2}{r2}", f"{l1}{r1}:{l2}{fim}"
         corpo = "".join(_linha_xml(r2 + i, c1, c2, cab, l) for i, l in enumerate(novas, start=1))

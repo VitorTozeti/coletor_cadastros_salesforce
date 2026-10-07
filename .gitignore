@@ -3,3 +3,7 @@
 coletor.log
 __pycache__/
 .env
+novos_estado.json
+coletor.lock
+*_Novos.xlsx
+*.tmp.xlsx
