@@ -43,8 +43,7 @@ SOQL_CONTAS = (
 )
 # Endereço: mais recente ATIVO, preferindo entrega (S). CA_TipoEndereco__c guarda 'S'/'B', não os rótulos.
 SOQL_END = (
-    "SELECT CA_Conta__c, CA_CEP__c, CA_Numero__c, CA_TipoEndereco__c, CreatedDate, CA_TipoLogradouro__c, "
-    "CA_Logradouro__c, CA_Complemento__c, CA_Bairro__c, CA_NomeMunicipio__c, CA_SiglaEstado__c "
+    "SELECT CA_Conta__c, CA_CEP__c, CA_Numero__c, CA_TipoEndereco__c, CreatedDate "
     "FROM CA_Endereco__c WHERE CA_StatusEndereco__c = 'Ativo' AND CA_Conta__c != null"
 )
 
@@ -78,10 +77,10 @@ def sf_query(soql):
         url, params = (t["instance_url"] + d["nextRecordsUrl"], None) if not d["done"] else (None, None)
 
 
-def melhor_endereco_completo():
+def melhor_endereco_completo(soql=None):
     """conta_id -> registro CA_Endereco__c: ativo mais recente, entrega (S) antes de cobrança."""
     mapa = {}
-    for e in sf_query(SOQL_END):
+    for e in sf_query(soql or SOQL_END):
         chave = (e["CA_TipoEndereco__c"] == "S", e["CreatedDate"])
         atual = mapa.get(e["CA_Conta__c"])
         if atual is None or chave > atual[0]:
@@ -131,6 +130,13 @@ def linhas_salesforce(contas=None, resumo=None):
             "Tipo_de_Conta": tipo, "Password": doc, "__PowerAppsId__": str(uuid.uuid4()),
         }
 
+# Consulta SÓ do arquivo de endereços (separada de propósito: se um campo for recusado, o Excel principal não é afetado).
+SOQL_END_COMPLETO = (
+    "SELECT CA_Conta__c, CA_CEP__c, CA_Numero__c, CA_TipoEndereco__c, CreatedDate, CA_TipoLogradouro__c, "
+    "CA_Logradouro__c, CA_Complemento__c, CA_Bairro__c, CA_NomeMunicipio__c, CA_SiglaEstado__c "
+    "FROM CA_Endereco__c WHERE CA_StatusEndereco__c = 'Ativo' AND CA_Conta__c != null"
+)
+
 
 # Arquivo de endereços/vínculo: recriado do zero a cada rodada (todas as contas aptas), SEM tocar no Excel principal
 # nem na tabela Consulta1 (o app e o fluxo atual continuam iguais). Quem lê é um fluxo/consulta à parte.
@@ -152,7 +158,7 @@ def linhas_enderecos():
     soql = SOQL_CONTAS.replace(" FROM Account", f", {campo} FROM Account") if campo else SOQL_CONTAS
     contas = list(sf_query(soql))
     por_id = {a["Id"]: a for a in contas}
-    ends = melhor_endereco_completo()
+    ends = melhor_endereco_completo(SOQL_END_COMPLETO)
     for a in contas:
         if motivo_fora(a):
             continue
@@ -313,7 +319,7 @@ def main(argv=None):
         TRAVA.unlink(missing_ok=True)
     try:  # arquivo à parte: se falhar não derruba a rodada principal (o Excel principal já foi tratado acima)
         com_tentativas(lambda: grava_enderecos(a.xlsx, a.dry_run))
-    except Exception as e:  # noqa: BLE001
+    except (Exception, SystemExit) as e:  # noqa: BLE001  (sf_query usa sys.exit: SystemExit também não pode derrubar a rodada)
         log(f"AVISO: arquivo de endereços não gravado: {e}")
     fora = {k: v for k, v in resumo.items() if k != "entra"}
     log(f"Salesforce: {sum(resumo.values())} contas; aptas={resumo['entra']}; fora do Excel={sum(fora.values())}")
