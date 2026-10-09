@@ -60,3 +60,17 @@ Proteções do coletor: nunca usa openpyxl no arquivo principal; recusa Power Qu
 OneDrive segurar o arquivo; estado `novos_estado.json` gravado ANTES da escrita (nada se perde se falhar no meio);
 sai com código ≠ 0 em qualquer falha (aparece no agendador e no `coletor.log`).
 Limitação conhecida: cliente já existente que mudar nome/e-mail no Salesforce não é atualizado (só entram CardCodes novos).
+
+## Endereço completo e vínculo PF↔PJ (branch `enderecos-completos`, 09/10/2026)
+O Excel principal (`Consulta1`) e o fluxo atual **não mudam**. Cada rodada também recria, do zero e de forma atômica,
+`PowerApp_Clientes_Enderecos.xlsx` (tabela `Enderecos`) ao lado do principal, com **todas as contas aptas**:
+`CardCode, Logradouro (tipo+nome), Numero, Complemento, Bairro, Cidade, UF, CEP, CardCode_Vinculado, Nome_Vinculado`
+(endereço = ativo mais recente de `CA_Endereco__c`, entrega antes de cobrança). Se esse arquivo falhar, a rodada principal
+não é afetada (só loga AVISO).
+- **Vínculo PF→PJ:** descubra o campo com `python sf_clientes_para_excel.py --xlsx "<caminho>" --descrever` (lista os
+  lookups Account→Account e quantos estão preenchidos) e ponha no `.env`: `SF_CAMPO_VINCULO=<campo>` (ex. `ParentId`).
+  Sem a variável, as colunas `*_Vinculado` ficam em branco.
+- **Para o app usar:** (1) criar na lista `Clientes_PowerApp` as colunas novas (só adicionar; as atuais ficam);
+  (2) um fluxo à parte lê `PowerApp_Clientes_Enderecos.xlsx`/`Enderecos` e atualiza os itens por `CardCode`;
+  (3) só então ler as colunas no app. Nada disso é necessário para o app continuar funcionando como hoje.
+- `--dry-run` calcula e mostra as contagens sem gravar o arquivo.

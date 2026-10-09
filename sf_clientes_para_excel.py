@@ -77,15 +77,20 @@ def sf_query(soql):
         url, params = (t["instance_url"] + d["nextRecordsUrl"], None) if not d["done"] else (None, None)
 
 
-def melhor_endereco():
-    """conta_id -> (cep, numero): ativo mais recente, entrega (S) antes de cobrança."""
+def melhor_endereco_completo(soql=None):
+    """conta_id -> registro CA_Endereco__c: ativo mais recente, entrega (S) antes de cobrança."""
     mapa = {}
-    for e in sf_query(SOQL_END):
+    for e in sf_query(soql or SOQL_END):
         chave = (e["CA_TipoEndereco__c"] == "S", e["CreatedDate"])
         atual = mapa.get(e["CA_Conta__c"])
         if atual is None or chave > atual[0]:
-            mapa[e["CA_Conta__c"]] = (chave, (e["CA_CEP__c"] or "", e["CA_Numero__c"] or ""))
+            mapa[e["CA_Conta__c"]] = (chave, e)
     return {k: v[1] for k, v in mapa.items()}
+
+
+def melhor_endereco():
+    """conta_id -> (cep, numero) — o que vai para o Excel principal (colunas inalteradas)."""
+    return {k: (e["CA_CEP__c"] or "", e["CA_Numero__c"] or "") for k, e in melhor_endereco_completo().items()}
 
 
 def documento(a):
@@ -124,6 +129,79 @@ def linhas_salesforce(contas=None, resumo=None):
             "MailStrNo": num, "Telefone": a["CA_Telefone1__c"] or a["CA_Celular__c"] or a["Phone"] or "",
             "Tipo_de_Conta": tipo, "Password": doc, "__PowerAppsId__": str(uuid.uuid4()),
         }
+
+# Consulta SÓ do arquivo de endereços (separada de propósito: se um campo for recusado, o Excel principal não é afetado).
+SOQL_END_COMPLETO = (
+    "SELECT CA_Conta__c, CA_CEP__c, CA_Numero__c, CA_TipoEndereco__c, CreatedDate, CA_TipoLogradouro__c, "
+    "CA_Logradouro__c, CA_Complemento__c, CA_Bairro__c, CA_NomeMunicipio__c, CA_SiglaEstado__c "
+    "FROM CA_Endereco__c WHERE CA_StatusEndereco__c = 'Ativo' AND CA_Conta__c != null"
+)
+
+
+# Arquivo de endereços/vínculo: recriado do zero a cada rodada (todas as contas aptas), SEM tocar no Excel principal
+# nem na tabela Consulta1 (o app e o fluxo atual continuam iguais). Quem lê é um fluxo/consulta à parte.
+COLUNAS_END = ["CardCode", "Logradouro", "Numero", "Complemento", "Bairro", "Cidade", "UF", "CEP",
+               "CardCode_Vinculado", "Nome_Vinculado"]
+# SF_CAMPO_VINCULO (.env) = campo do Account que liga uma conta PF a uma PJ (lookup). Vazio = colunas *_Vinculado
+# ficam em branco. Descobrir o campo com --descrever; ex.: ParentId ou um CA_*__c customizado.
+
+
+def campo_vinculo():
+    c = os.environ.get("SF_CAMPO_VINCULO", "").strip()
+    if c and not re.fullmatch(r"[A-Za-z0-9_]+", c):
+        sys.exit(f"SF_CAMPO_VINCULO inválido: {c!r}")
+    return c
+
+
+def linhas_enderecos():
+    campo = campo_vinculo()
+    soql = SOQL_CONTAS.replace(" FROM Account", f", {campo} FROM Account") if campo else SOQL_CONTAS
+    contas = list(sf_query(soql))
+    por_id = {a["Id"]: a for a in contas}
+    ends = melhor_endereco_completo(SOQL_END_COMPLETO)
+    for a in contas:
+        if motivo_fora(a):
+            continue
+        e = ends.get(a["Id"], {})
+        vinc = por_id.get(a.get(campo)) if campo and a.get(campo) else None
+        logr = " ".join(x for x in ((e.get("CA_TipoLogradouro__c") or "").strip(),
+                                    (e.get("CA_Logradouro__c") or "").strip()) if x)
+        yield {
+            "CardCode": a["CA_CodigoSAP__c"].strip().upper(), "Logradouro": logr, "Numero": e.get("CA_Numero__c") or "",
+            "Complemento": e.get("CA_Complemento__c") or "", "Bairro": e.get("CA_Bairro__c") or "",
+            "Cidade": e.get("CA_NomeMunicipio__c") or "", "UF": e.get("CA_SiglaEstado__c") or "",
+            "CEP": e.get("CA_CEP__c") or "",
+            "CardCode_Vinculado": ((vinc or {}).get("CA_CodigoSAP__c") or "").strip().upper(),
+            "Nome_Vinculado": (vinc or {}).get("Name") or "",
+        }
+
+
+def grava_enderecos(xlsx, dry_run=False):
+    """Recria PowerApp_Clientes_Enderecos.xlsx (tabela `Enderecos`) ao lado do principal."""
+    linhas = list(linhas_enderecos())
+    log(f"endereços: {len(linhas)} contas aptas; com logradouro={sum(1 for l in linhas if l['Logradouro'])}; "
+        f"com vínculo={sum(1 for l in linhas if l['CardCode_Vinculado'])}")
+    if dry_run:
+        return
+    destino = Path(xlsx).with_name(Path(xlsx).stem + "_Enderecos.xlsx")
+    novos_xlsx.grava(destino, linhas, COLUNAS_END, "Enderecos")
+    log(f"{destino.name} gravado")
+
+
+def descrever():
+    """Lista os campos de Account que são lookup para Account (candidatos a ligar PF -> PJ) e quantos usam cada um."""
+    r = requests.post(os.environ["SF_LOGIN_URL"] + "/services/oauth2/token", data={
+        "grant_type": "client_credentials", "client_id": os.environ["SF_CLIENT_ID"],
+        "client_secret": os.environ["SF_CLIENT_SECRET"]}, timeout=60)
+    r.raise_for_status()
+    t = r.json()
+    d = requests.get(t["instance_url"] + "/services/data/v60.0/sobjects/Account/describe",
+                     headers={"Authorization": "Bearer " + t["access_token"]}, timeout=60)
+    d.raise_for_status()
+    for f in d.json()["fields"]:
+        if f["type"] == "reference" and f["referenceTo"] == ["Account"]:
+            n = next(sf_query(f"SELECT COUNT(Id) n FROM Account WHERE {f['name']} != null"))["n"]
+            print(f"{f['name']:<35} {f['label']:<40} preenchidos={n}")
 
 
 ESTADO = AQUI / "novos_estado.json"  # nunca versionar (tem dados de clientes)
@@ -217,9 +295,14 @@ def main(argv=None):
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--forcar", action="store_true", help="ignora o limite de segurança de novos CardCodes")
+    ap.add_argument("--descrever", action="store_true",
+                    help="lista lookups Account->Account (candidatos ao vínculo PF/PJ) e quantos estão preenchidos")
     ap.add_argument("--diagnostico", metavar="CARDCODE_OU_NOME", help="explica por que um cliente aparece ou não")
     a = ap.parse_args(argv)
     carrega_env()
+    if a.descrever:
+        descrever()
+        sys.exit(0)
     if a.diagnostico:
         diagnostico(a.xlsx, a.diagnostico)
         sys.exit(0)
@@ -234,6 +317,10 @@ def main(argv=None):
         sys.exit("Excel em uso/bloqueado pelo OneDrive mesmo após várias tentativas. Nada foi gravado.")
     finally:
         TRAVA.unlink(missing_ok=True)
+    try:  # arquivo à parte: se falhar não derruba a rodada principal (o Excel principal já foi tratado acima)
+        com_tentativas(lambda: grava_enderecos(a.xlsx, a.dry_run))
+    except (Exception, SystemExit) as e:  # noqa: BLE001  (sf_query usa sys.exit: SystemExit também não pode derrubar a rodada)
+        log(f"AVISO: arquivo de endereços não gravado: {e}")
     fora = {k: v for k, v in resumo.items() if k != "entra"}
     log(f"Salesforce: {sum(resumo.values())} contas; aptas={resumo['entra']}; fora do Excel={sum(fora.values())}")
     for motivo, qtd in sorted(fora.items(), key=lambda x: -x[1]):
