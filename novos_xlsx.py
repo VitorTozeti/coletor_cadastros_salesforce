@@ -23,8 +23,9 @@ def _cel(ref, v):
     return f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{escape(str(v or ""))}</t></is></c>'
 
 
-def grava(destino, linhas):
-    """linhas: lista de dicts com as COLUNAS. Mantém ao menos 1 linha (uma tabela do Excel não pode ficar vazia)."""
+def grava(destino, linhas, COLUNAS=COLUNAS, nome="Novos"):
+    """linhas: lista de dicts com as COLUNAS. Mantém ao menos 1 linha (uma tabela do Excel não pode ficar vazia).
+    COLUNAS/nome: padrão = arquivo _Novos; o de endereços passa os seus (aba e tabela com o mesmo nome)."""
     linhas = list(linhas)
     if not linhas:  # linha-sentinela: o fluxo ignora CardCode vazio
         linhas = [{c: "" for c in COLUNAS}]
@@ -38,15 +39,15 @@ def grava(destino, linhas):
              f'<dimension ref="A1:{fim}"/><sheetData>{"".join(rows)}</sheetData>'
              '<tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>')
     cols = "".join(f'<tableColumn id="{i + 1}" name="{c}"/>' for i, c in enumerate(COLUNAS))
-    tabela = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><table xmlns="{NS}" id="1" name="Novos" '
-              f'displayName="Novos" ref="A1:{fim}" totalsRowShown="0"><autoFilter ref="A1:{fim}"/>'
+    tabela = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><table xmlns="{NS}" id="1" name="{nome}" '
+              f'displayName="{nome}" ref="A1:{fim}" totalsRowShown="0"><autoFilter ref="A1:{fim}"/>'
               f'<tableColumns count="{len(COLUNAS)}">{cols}</tableColumns>'
               '<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" '
               'showColumnStripes="0"/></table>')
     partes = {
         "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>',
         "_rels/.rels": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-        "xl/workbook.xml": f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Novos" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        "xl/workbook.xml": f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{nome}" sheetId="1" r:id="rId1"/></sheets></workbook>',
         "xl/_rels/workbook.xml.rels": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
         "xl/worksheets/sheet1.xml": sheet,
         "xl/worksheets/_rels/sheet1.xml.rels": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>',
